@@ -62,6 +62,9 @@ func (s *scanner) transactionsByHeader(header *types.Header) (txns []Transaction
 }
 
 func (s *scanner) filter(txns []Transaction) (ret []Transaction) {
+	if len(s.filters) == 0 {
+		return txns
+	}
 	for _, txn := range txns {
 		for _, filter := range s.filters {
 			if filter.evaluate(&txn) {
