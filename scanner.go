@@ -21,6 +21,10 @@ func NewScanner(ctx context.Context, networkUrl string, filters ...TransactionFi
 	return &scanner{client, filters}, err
 }
 
+func (s *scanner) SetFilters(filters ...TransactionFilter) {
+	s.filters = filters
+}
+
 func (s *scanner) SubscribeNewTransactions(ctx context.Context, transactions chan<- Transaction) (ethereum.Subscription, error) {
 	headers := make(chan *types.Header)
 	sub, err := s.client.SubscribeNewHead(ctx, headers)
