@@ -2,6 +2,7 @@ package txnscan
 
 import (
 	"context"
+	"iter"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -9,78 +10,61 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 )
 
-var defaultTimeout = 15 * time.Second
-
 type scanner struct {
-	client  *ethclient.Client
-	filters []TransactionFilter
+	networkUrl string
 }
 
-func NewScanner(ctx context.Context, networkUrl string, filters ...TransactionFilter) (*scanner, error) {
-	client, err := ethclient.DialContext(ctx, networkUrl)
-	return &scanner{client, filters}, err
+func NewScanner(networkUrl string) *scanner {
+	return &scanner{networkUrl}
 }
 
-func (s *scanner) SetFilters(filters ...TransactionFilter) {
-	s.filters = filters
-}
-
-func (s *scanner) SubscribeNewTransactions(ctx context.Context, transactions chan<- Transaction) (ethereum.Subscription, error) {
-	headers := make(chan *types.Header)
-	sub, err := s.client.SubscribeNewHead(ctx, headers)
+func (s *scanner) SubscribeNewTransactions(ctx context.Context, txCh chan<- *types.Transaction, filters ...TransactionFilter) (ethereum.Subscription, error) {
+	client, err := ethclient.DialContext(ctx, s.networkUrl)
 	if err != nil {
 		return nil, err
 	}
-	go s.startScanning(sub, headers, transactions)
+
+	headers := make(chan *types.Header)
+	sub, err := client.SubscribeNewHead(ctx, headers)
+	if err != nil {
+		return nil, err
+	}
+
+	go s.startScan(client, sub, headers, txCh, filters...)
+
 	return sub, err
 }
 
-func (s *scanner) startScanning(sub ethereum.Subscription, headers chan *types.Header, transactions chan<- Transaction) {
+func (s *scanner) startScan(client *ethclient.Client, sub ethereum.Subscription, headers chan *types.Header, txCh chan<- *types.Transaction, filters ...TransactionFilter) {
 	defer close(headers)
 	for {
 		select {
 		case <-sub.Err():
 			return
 		case header := <-headers:
-			txns := s.transactionsByHeader(header)
-			sendTransactions(s.filter(txns), transactions)
-		}
-	}
-}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			block, err := client.BlockByHash(ctx, header.Hash())
+			if err != nil {
+				continue
+			}
 
-func (s *scanner) transactionsByHeader(header *types.Header) (txns []Transaction) {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
-	defer cancel()
-	block, err := s.client.BlockByHash(ctx, header.Hash())
-	if err != nil {
-		return []Transaction{}
-	}
-	for _, txn := range block.Transactions() {
-		message, err := txn.AsMessage(types.LatestSignerForChainID(txn.ChainId()), block.BaseFee())
-		if err != nil {
-			continue
-		}
-		txns = append(txns, Transaction{Transaction: *txn, from: message.From()})
-	}
-	return
-}
-
-func (s *scanner) filter(txns []Transaction) (ret []Transaction) {
-	if len(s.filters) == 0 {
-		return txns
-	}
-	for _, txn := range txns {
-		for _, filter := range s.filters {
-			if filter.evaluate(&txn) {
-				ret = append(ret, txn)
+			for tx := range filteredTransactions(filters, block.Transactions()) {
+				txCh <- tx
 			}
 		}
 	}
-	return ret
 }
 
-func sendTransactions(txns []Transaction, ch chan<- Transaction) {
-	for _, txn := range txns {
-		ch <- txn
+func filteredTransactions(filters TransactionFilters, txs types.Transactions) iter.Seq[*types.Transaction] {
+	return func(yield func(*types.Transaction) bool) {
+		for _, tx := range txs {
+			if !filters.evaluate(tx) {
+				continue
+			}
+			if !yield(tx) {
+				return
+			}
+		}
 	}
 }
